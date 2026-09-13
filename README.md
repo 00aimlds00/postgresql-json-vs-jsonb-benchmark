@@ -1,251 +1,180 @@
-PostgreSQL JSON vs JSONB Performance Benchmark
-Overview
+# PostgreSQL JSONB — Flexible Student Profiles & JSON vs JSONB Benchmark
 
-This project benchmarks PostgreSQL's JSON and JSONB data types using a large dataset of 500,000 records per table (1 million total records).
+A hands-on exploration of PostgreSQL's `JSONB` type for storing student profile
+data that doesn't fit a rigid, fixed-column schema — comparing `JSON` vs `JSONB`
+storage, benchmarking query performance with and without indexes, and testing
+containment (`@>`), key-existence (`?`), and jsonpath (`@?`) operators on a
+dataset of 1,000,000 rows.
 
-The objective was to measure:
+## Why JSONB?
 
-Query performance
-JSON parsing overhead
-JSONB binary storage advantages
-GIN index effectiveness
-Containment query performance
+Student records often carry optional, nested, or evolving attributes —
+scholarships, skill lists, subject-wise exam scores, extracurricular data —
+that vary from student to student. Rather than adding new nullable columns
+every time a new attribute appears, this project stores that variable part of
+the profile as JSONB alongside a normal relational core (`id`, `name`,
+`student_id`, `class`), then benchmarks how well Postgres performs on it at
+scale.
 
-All tests were executed inside PostgreSQL running in Docker.
+## What this covers
 
-Tech Stack
-PostgreSQL 16
-Docker
-SQL
-JSON
-JSONB
-GIN Indexes
-Windows 11
-16 GB RAM
-Dataset
+- `JSON` vs `JSONB` storage and query performance, side by side
+- GIN indexing on JSONB columns and its effect on containment queries
+- Practical query patterns: `->`, `->>`, `?`, `@>`, `@?` (jsonpath)
+- Before/after benchmarks (`EXPLAIN ANALYZE`) on 500K rows per table
+- Running Postgres in Docker with a Python script for querying/inserting
 
-Two tables were created containing identical data.
+## Tech Stack
 
-JSON Table
+- PostgreSQL 16
+- Docker
+- Python
+- SQL / JSON / JSONB / GIN Indexes
+- Windows 11, 16 GB RAM
+
+## Setup
+
+```bash
+docker compose up -d
+docker exec -it postgres_jsonb_demo psql -U postgres -d student_db
+```
+
+Run the Python query script:
+
+```bash
+python jsonb_queries.py
+```
+
+---
+
+## Benchmark: JSON vs JSONB Performance
+
+### Overview
+
+Two identical-shape tables, 500,000 rows each (1,000,000 rows total), were
+used to measure query performance, JSON parsing overhead, JSONB binary
+storage advantages, GIN index effectiveness, and containment query speed.
+
+### Dataset
+
+```sql
 CREATE TABLE students_json (
     id SERIAL PRIMARY KEY,
     profile JSON
 );
 
-JSONB Table
 CREATE TABLE students_jsonb (
     id SERIAL PRIMARY KEY,
     profile JSONB
 );
+```
 
-Adding 500000 records in each table
+Populated with generated records of this shape:
 
-student_db=# INSERT INTO students_json(profile)
-SELECT json_build_object(
-    'name', 'Student_' || g,
-    'age', floor(random()*10 + 15),
-    'gpa', round((random()*4)::numeric, 2),
-    'city',
-    (ARRAY['Siliguri','Kolkata','Delhi','Mumbai','Hyderabad','Bangalore'])
-    [floor(random()*6 + 1)]
-)
-FROM generate_series(1,500000) g;
-
-student_db=# INSERT INTO students_jsonb(profile)
-SELECT jsonb_build_object(
-    'name', 'Student_' || g,
-    'age', floor(random()*10 + 15),
-    'gpa', round((random()*4)::numeric, 2),
-    'city',
-    (ARRAY['Siliguri','Kolkata','Delhi','Mumbai','Hyderabad','Bangalore'])
-    [floor(random()*4 + 1)]
-)
-FROM generate_series(1,500000) g;
-
-Sample Record
+```json
 {
   "name": "Student_1",
   "age": 22,
   "city": "Siliguri",
   "gpa": 3.01
 }
+```
 
-Dataset Size
-Table	Recordsstudents_json	500,000
-students_jsonb	500,000
-Total	1,000,000
-Benchmark 1: Missing Key Lookup
+| Table            | Records   |
+|------------------|-----------|
+| students_json    | 500,000   |
+| students_jsonb   | 500,000   |
+| **Total**        | 1,000,000 |
 
-Query:
+### Benchmark 1 — Missing Key Lookup
 
-EXPLAIN ANALYZE
-SELECT *
-FROM students_json
-WHERE profile->>'stream' = 'Science';
+```sql
+SELECT * FROM students_json  WHERE profile->>'stream' = 'Science';
+SELECT * FROM students_jsonb WHERE profile->>'stream' = 'Science';
+```
 
-EXPLAIN ANALYZE
-SELECT *
-FROM students_jsonb
-WHERE profile->>'stream' = 'Science';
+The dataset has no `stream` field, so Postgres has to scan and evaluate every row.
 
-Observation
+| Table  | Execution Time |
+|--------|----------------|
+| JSON   | 200.303 ms     |
+| JSONB  | 66.203 ms      |
 
-The dataset did not contain a stream field.
+**Finding:** JSONB completed the scan roughly 3x faster than JSON, even though both queries returned zero rows.
 
-PostgreSQL was forced to scan every row and evaluate the condition.
+### Benchmark 2 — GPA Filtering
 
-Results
-Table	Execution TimeJSON	200.303 ms
-JSONB	66.203 ms
-Finding
+```sql
+SELECT * FROM students_json  WHERE (profile->>'gpa')::numeric > 3.5;
+SELECT * FROM students_jsonb WHERE (profile->>'gpa')::numeric > 3.5;
+```
 
-JSONB completed the scan approximately 3x faster than JSON despite both queries returning zero rows.
+| Table  | Execution Time | Rows Returned | Rows Removed |
+|--------|----------------|----------------|---------------|
+| JSON   | 737.288 ms     | 62,204         | 437,796       |
+| JSONB  | 428.615 ms     | 61,923         | 438,077       |
 
-Benchmark 2: GPA Filtering
+**Finding:** JSONB was ~1.7x faster while performing the same full-table scan.
 
-Query:
+### GIN Index Creation
 
-EXPLAIN ANALYZE
-SELECT *
-FROM students_json
-WHERE (profile->>'gpa')::numeric > 3.5;
-
-EXPLAIN ANALYZE
-SELECT *
-FROM students_jsonb
-WHERE (profile->>'gpa')::numeric > 3.5;
-
-JSON
-Execution Time: 737.288 ms
-Rows Returned: 62,204
-Rows Removed: 437,796
-
-JSONB
-Execution Time: 428.615 ms
-Rows Returned: 61,923
-Rows Removed: 438,077
-
-Results
-Table	Execution TimeJSON	737.288 ms
-JSONB	428.615 ms
-Finding
-
-JSONB was approximately 1.7x faster while performing the same full-table scan operation.
-
-GIN Index Creation
-
-A GIN index was added to the JSONB column.
-
+```sql
 CREATE INDEX idx_students_jsonb_profile
 ON students_jsonb
 USING GIN(profile);
+```
 
-Benchmark 3: Indexed Containment Query
+### Benchmark 3 — Indexed Containment Query
 
-Query:
+```sql
+SELECT * FROM students_jsonb WHERE profile @> '{"city":"Siliguri"}';
+```
 
-EXPLAIN ANALYZE
-SELECT *
-FROM students_jsonb
-WHERE profile @> '{"city":"Siliguri"}';
+| Metric          | Value        |
+|-----------------|--------------|
+| Rows Returned   | 125,278      |
+| Execution Time  | 55.485 ms    |
+| Query Plan      | Bitmap Index Scan → Bitmap Heap Scan |
 
-Execution Plan
-Bitmap Index Scan
-Bitmap Heap Scan
+**Finding:** Postgres used the GIN index directly, cutting execution time dramatically versus a full scan.
 
-Results
-Rows Returned: 125,278
+### Benchmark 4 — Missing Document Search Using GIN
 
-Execution Time: 55.485 ms
+```sql
+SELECT * FROM students_jsonb WHERE profile @> '{"scholarship":true}';
+```
 
-Finding
+| Metric          | Value     |
+|-----------------|-----------|
+| Rows Returned   | 0         |
+| Execution Time  | 0.097 ms  |
 
-PostgreSQL successfully utilized the GIN index.
+**Finding:** The GIN index ruled out any match almost instantly, no scan required.
 
-Execution time dropped dramatically compared with full table scans.
+### Results Summary
 
-Benchmark 4: Missing Document Search Using GIN
+| Benchmark                        | JSON        | JSONB      |
+|-----------------------------------|-------------|------------|
+| Missing Key Scan                  | 200.303 ms  | 66.203 ms  |
+| GPA Filter                        | 737.288 ms  | 428.615 ms |
+| GIN Indexed City Lookup           | N/A         | 55.485 ms  |
+| GIN Indexed Missing Key Search    | N/A         | 0.097 ms   |
 
-Query:
+### Key Findings
 
-EXPLAIN ANALYZE
-SELECT *
-FROM students_jsonb
-WHERE profile @> '{"scholarship":true}';
+- **JSONB is faster** — it outperformed JSON in every comparable test.
+- **JSONB reduces parsing overhead** — JSON stores raw text; JSONB stores a
+  binary representation Postgres can process more efficiently.
+- **GIN indexes are a game changer** — query time dropped from hundreds of
+  milliseconds to ~55 ms on 500,000 JSONB documents.
+- **JSON can't compete on indexing** — it doesn't support GIN indexes, the
+  containment operator (`@>`), or efficient document search, which is why
+  Postgres recommends JSONB for most production workloads.
 
-Results
-Rows Returned: 0
+### Conclusion
 
-Execution Time: 0.097 ms
-
-Finding
-
-The GIN index was able to determine that no matching documents existed almost instantly.
-
-Query Plan Comparison
-Without Index
-Seq Scan
-
-
-PostgreSQL examined every row.
-
-With GIN Index
-Bitmap Index Scan
-Bitmap Heap Scan
-
-
-PostgreSQL directly located matching rows using the index.
-
-Results Summary
-Benchmark	JSON	JSONBMissing Key Scan	200.303 ms	66.203 ms
-GPA Filter	737.288 ms	428.615 ms
-GIN Indexed City Lookup	N/A	55.485 ms
-GIN Indexed Missing Key Search	N/A	0.097 ms
-Key Findings
-JSONB is Faster
-
-JSONB consistently outperformed JSON in all comparable tests.
-
-JSONB Reduces Parsing Overhead
-
-JSON stores raw text.
-
-JSONB stores a binary representation that PostgreSQL can process more efficiently.
-
-GIN Indexes are Game Changers
-
-A GIN index reduced query execution time from hundreds of milliseconds to approximately:
-
-55 ms
-
-
-for a dataset containing:
-
-500,000 JSONB documents
-
-JSON Cannot Compete Here
-
-JSON does not support:
-
-GIN indexing
-Containment operator (@>)
-Efficient document searching
-
-These are major reasons PostgreSQL recommends JSONB for most production workloads.
-
-Conclusion
-
-This benchmark demonstrates that:
-
-JSONB is significantly faster than JSON for read-heavy workloads.
-JSONB supports advanced indexing and document search capabilities.
-GIN indexes provide substantial performance improvements on large datasets.
-JSONB is the preferred choice for production applications involving:
-APIs
-Search functionality
-Analytics workloads
-Event data
-Flexible schemas
-
-
-
+This benchmark shows that JSONB is significantly faster than JSON for
+read-heavy workloads, supports advanced indexing and document search, and
+that GIN indexes provide substantial performance gains at scale. JSONB is
+the preferred choice for production use cases involving APIs, search
+functionality, analytics workloads, event data, and flexible schemas.
