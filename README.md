@@ -1,5 +1,3 @@
-Here's a GitHub-ready README that turns your work into a strong portfolio project.
-
 PostgreSQL JSON vs JSONB Performance Benchmark
 Overview
 
